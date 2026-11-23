@@ -109,7 +109,32 @@ def make_bot() -> commands.Bot:
     return bot
 
 
+# Held for the life of the process; closing it (or dying) releases the lock.
+_LOCK_HANDLE = None
+
+
+def claim_singleton() -> None:
+    """Refuse to open a second gateway session on this box.
+
+    Discord fans every event out to every session of a token, so a second
+    process does not add capacity — it answers the same message again in
+    different words. Exiting here is the whole fix for "double bots".
+    """
+    global _LOCK_HANDLE
+    from single_instance import AlreadyRunning, claim
+
+    path = os.environ.get("BOT_LOCK_PATH", "/tmp/inferolli-bot.lock")
+    try:
+        _LOCK_HANDLE = claim(path)
+    except AlreadyRunning as e:
+        log.error("another inferolli already owns this box — %s", e)
+        log.error("not starting a second gateway session: every message would "
+                  "be answered twice. exiting with 3.")
+        sys.exit(3)
+
+
 async def main() -> None:
+    claim_singleton()
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
     if missing:
         log.error("Missing required env vars: %s (see .env.example)", ", ".join(missing))

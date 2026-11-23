@@ -11,6 +11,22 @@ SLOG=/bot/bot.log
 slog() { echo "[start $(date -u +%H:%M:%S)] $*" >> "$SLOG"; }
 slog "start.sh up: .env=$([ -f /bot/.env ] && echo present || echo absent), env vars=$(env | wc -l)"
 
+# --- ONE start.sh per box ---
+# A resume re-runs this command even when the previous tree is still alive.
+# On 2026-11-22 that left FIVE start.sh trees and TWO bot.py processes on one
+# token: both answered every message, so the server saw double replies. The
+# bot refuses a second gateway itself (single_instance.py); this stops the
+# second supervisor/watchdog from existing at all. flock is released by the
+# kernel when the holder dies, so a crashed tree never blocks the next boot.
+if command -v flock >/dev/null 2>&1; then
+  exec 200>/tmp/inferolli-start.lock
+  if ! flock -n 200; then
+    slog "a start.sh tree already owns this box — this invocation exits"
+    echo "[start] another start.sh is already running; not starting a second stack"
+    exit 0
+  fi
+fi
+
 rebuild_env_from_environment() {
   # A sandbox created by a PREDECESSOR (the 24h reincarnation path) has no
   # launcher to write /bot/.env, and the canonical copy lives in S3 — which we
@@ -233,6 +249,13 @@ while true; do
   echo "=== [supervisor] starting bot $(date)" >> /bot/bot.log
   python -u bot.py >> /bot/bot.log 2>&1
   code=$?
-  echo "[supervisor] bot exited with $code — restarting in 5s" >> /bot/bot.log
-  sleep 5
+  if [ "$code" = 3 ]; then
+    # the bot refused: another live process owns the token on this box. Do not
+    # hammer it at 5s intervals — it will be gone (or this tree will) soon.
+    echo "[supervisor] another bot holds the lock — waiting 60s" >> /bot/bot.log
+    sleep 60
+  else
+    echo "[supervisor] bot exited with $code — restarting in 5s" >> /bot/bot.log
+    sleep 5
+  fi
 done
