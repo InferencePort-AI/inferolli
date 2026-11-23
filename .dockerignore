@@ -6,5 +6,6 @@ __pycache__/
 *.pyc
 .git/
 .venv/
+data.vpsbak-*
 data/memory/stm.json.tmp
 discord-bot.service
