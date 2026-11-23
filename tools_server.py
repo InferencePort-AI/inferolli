@@ -4,8 +4,11 @@ Direct mentions run through a multi-turn loop: the model answers with either
 a tool call ({tool, args}) or the final {reply, actions}. The harness
 executes tools and feeds results back (max hops, then it must answer).
 
-Tools: web_search (TinyFish if keyed, DuckDuckGo otherwise), fetch_page,
-channel_history, member_profile, docs_search.
+The tool surface itself lives in tool_registry.py: every tool below is a
+decorated handler with a schema, tier, timeout and audit flag, and the prompt
+the model sees is GENERATED from that registry — what's advertised and what's
+installed are the same set by construction. This module owns the loop and the
+handler bodies; run_tool is a thin delegate.
 """
 
 import asyncio
@@ -24,6 +27,8 @@ import ai
 from ai import AIError
 import memory
 import settings
+import tool_registry
+from tool_registry import tool
 
 log = logging.getLogger("tools")
 
@@ -58,33 +63,23 @@ def claimed_without_evidence(reply: str, tool_calls: int) -> bool:
     return bool(reply) and tool_calls == 0 and bool(_CLAIM_RX.search(reply))
 
 
-TOOLS_PROMPT = """
-TOOLS (you can look things up before answering). Reply ONLY JSON, either:
-  {"tool": "<name>", "args": {...}}          ← to look something up first
-  {"reply": "<your answer>", "actions": []}  ← your final answer (+optional server actions)
-
-Available tools:
-  {"tool": "web_search", "args": {"query": "..."}}          — search the web
-  {"tool": "fetch_page", "args": {"url": "https://..."}}    — read a web page
-  {"tool": "channel_history", "args": {"channel": "#name", "n": 10}} — recent messages from any channel
-  {"tool": "discord_search", "args": {"query": "words", "channel": "#optional", "author": "optional", "n": 10}} — search the server's ENTIRE history (reaches back further than your own memory; use it for "what did we say about X a while ago")
-  {"tool": "member_profile", "args": {"name": "someone"}}   — everything you know about a member
-  {computer_line}
-Use them when the answer isn't already in what you know: current events, prices,
-anything after your training, or specifics from other channels. Then answer in
-your normal voice — cite what you found naturally, don't announce tool use.
-
-FORMAT IS STRICT: your entire reply must be ONE JSON object — nothing before it,
-nothing after it, no XML, no <tool calls> tags, no prose around it. If you don't
-need a tool, just answer: {"reply": "..."}. Most messages need no tool at all —
-small talk, opinions, and anything you already know should go straight to
-{"reply": "..."}.
-"""
-COMPUTER_TOOL = '  {"tool": "computer", "args": {"prompt": "..."}}     — delegate a task to your computer: bash, files, AND its live desktop (open a web page in chromium, click/type with xdotool, screenshot) — ADMIN requests only, quick tasks (90s cap)'
+# The TOOLS section of the system prompt is GENERATED from the registry —
+# only what exists can be advertised, and a test keeps the two from drifting.
+# The registry is filled by the @tool decorators below, so this can't be a
+# plain global computed at import time (it would snapshot an empty registry):
+# module __getattr__ (PEP 562) makes tools_server.TOOLS_PROMPT generate on
+# first access, after the whole module has run. Member view; run_loop asks
+# the registry for the caller's view (admin adds the admin-tier tools).
+def __getattr__(name):
+    if name == "TOOLS_PROMPT":
+        return tool_registry.tools_prompt(admin=False)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------- web search: TinyFish if keyed, DuckDuckGo otherwise ----------
 
+@tool(name="web_search", description="search the web",
+      args={"query": "str:300"}, timeout=25)
 async def web_search(query: str) -> str:
     if TINYFISH_KEY:
         try:
@@ -121,6 +116,8 @@ async def web_search(query: str) -> str:
         return f"(web search unavailable: {str(e)[:80]})"
 
 
+@tool(name="fetch_page", description="read a web page",
+      args={"url": "str:500"}, timeout=30)
 async def fetch_page(url: str) -> str:
     if TINYFISH_KEY:
         try:
@@ -148,7 +145,11 @@ async def fetch_page(url: str) -> str:
 
 # ---------- server-side tools ----------
 
-async def channel_history(bot, channel_name: str, n: int = 10) -> str:
+@tool(name="channel_history",
+      description="recent messages from any channel",
+      args={"channel": "str:80", "n": "?int:2..25"})
+async def channel_history(bot, channel: str, n: int = 10) -> str:
+    channel_name = channel
     for guild in bot.guilds:
         ch = discord_find_channel(guild, channel_name)
         if ch is None:
@@ -172,6 +173,11 @@ def discord_find_channel(guild, name: str):
     return ch
 
 
+@tool(name="discord_search",
+      description='search the server\'s ENTIRE history (reaches back further than '
+                  'your own memory; use it for "what did we say about X a while ago")',
+      args={"query": "str:300", "channel": "?str:80", "author": "?str:60",
+            "n": "?int:1..25"})
 async def discord_search(bot, query: str, channel: str | None = None,
                          author: str | None = None, n: int = 10) -> str:
     """Search the guild's FULL message history via Discord's own search index.
@@ -256,6 +262,9 @@ async def discord_search(bot, query: str, channel: str | None = None,
     return head + ":\n" + "\n".join(lines)
 
 
+@tool(name="member_profile",
+      description="everything you know about a member",
+      args={"name": "str:60"})
 async def member_profile(bot, name: str) -> str:
     entries = await memory.stm_window(hours=24 * 7)
     theirs = [e for e in entries if name.lower() in e["name"].lower()]
@@ -270,6 +279,9 @@ async def member_profile(bot, name: str) -> str:
             f"{_memory_block(mem, server, [])}\n\ntheir recent messages:\n{recent}")
 
 
+@tool(name="docs_search",
+      description="search the bot's own docs (setup, voice troubleshooting)",
+      args={"query": "str:300"})
 async def docs_search(query: str) -> str:
     try:
         import rag
@@ -360,70 +372,65 @@ def parse_envelope(text: str) -> dict | None:
     return _unwrap_tool_tags(cleaned) or _unwrap_tool_tags(raw)
 
 
-async def run_tool(bot, name: str, args: dict) -> str:
-    name = (name or "").strip()
-    try:
-        if name == "web_search":
-            return await web_search(str(args.get("query", ""))[:300])
-        if name == "fetch_page":
-            return await fetch_page(str(args.get("url", ""))[:500])
-        if name == "channel_history":
-            return await channel_history(bot, str(args.get("channel", "")), int(args.get("n", 10) or 10))
-        if name == "discord_search":
-            return await discord_search(bot, str(args.get("query", ""))[:300],
-                                        channel=args.get("channel") or None,
-                                        author=args.get("author") or None,
-                                        n=int(args.get("n", 10) or 10))
-        if name == "member_profile":
-            return await member_profile(bot, str(args.get("name", ""))[:60])
-        if name == "docs_search":
-            return await docs_search(str(args.get("query", ""))[:300])
-        if name == "computer":
-            if not settings.get_bool("computer.tool_enabled", True,
-                                    env="COMPUTER_TOOL_ENABLED"):
-                return "(computer access disabled)"
-            prompt = str(args.get("prompt", ""))[:500]
-            # /workspace only exists inside the sandbox. Running the command
-            # anyway made sh answer "can't cd to /workspace", which the model
-            # then narrated as a mysterious failure ("my computer tool keeps
-            # dying on a cd /workspace") instead of the plain fact: there is
-            # no sandbox. Say that, and execute nothing.
-            workspace = os.environ.get("COMPUTER_WORKSPACE", "/workspace")
-            if not os.path.isdir(workspace):
-                return (f"(no sandbox: nothing at {workspace}, so i didn't run "
-                        "anything. i can only use my computer while my sandbox is up)")
-            if not shutil.which("opencode"):
-                return ("(no sandbox: `opencode` isn't on PATH here, so i didn't "
-                        "run anything. i can only use my computer inside my sandbox)")
-            import subprocess
-            cmd = (f"cd {shlex.quote(workspace)} && timeout 90 opencode run "
-                   f"{shlex.quote(prompt)}")
-            r = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: subprocess.run(
-                    ["bash", "-lc", cmd], capture_output=True, text=True,
-                    timeout=110))
-            out = (r.stdout or "").strip()
-            if not out:
-                why = (r.stderr or "").strip()[:200] or f"exit {r.returncode}"
-                return f"(the sandbox ran nothing for me: {why})"
-            return out[:1200]
-        return f"(unknown tool: {name})"
-    except Exception as e:
-        return f"(tool {name} failed: {str(e)[:80]})"
+@tool(name="computer",
+      description="delegate a task to your computer: bash, files, AND its live desktop "
+                  "(open a web page in chromium, click/type with xdotool, screenshot) — "
+                  "ADMIN requests only, quick tasks (90s cap)",
+      args={"prompt": "str:500"}, tier="admin", timeout=120)
+async def computer(prompt: str) -> str:
+    if not settings.get_bool("computer.tool_enabled", True,
+                            env="COMPUTER_TOOL_ENABLED"):
+        return "(computer access disabled)"
+    # /workspace only exists inside the sandbox. Running the command
+    # anyway made sh answer "can't cd to /workspace", which the model
+    # then narrated as a mysterious failure ("my computer tool keeps
+    # dying on a cd /workspace") instead of the plain fact: there is
+    # no sandbox. Say that, and execute nothing.
+    workspace = os.environ.get("COMPUTER_WORKSPACE", "/workspace")
+    if not os.path.isdir(workspace):
+        return (f"(no sandbox: nothing at {workspace}, so i didn't run "
+                "anything. i can only use my computer while my sandbox is up)")
+    if not shutil.which("opencode"):
+        return ("(no sandbox: `opencode` isn't on PATH here, so i didn't "
+                "run anything. i can only use my computer inside my sandbox)")
+    import subprocess
+    cmd = (f"cd {shlex.quote(workspace)} && timeout 90 opencode run "
+           f"{shlex.quote(prompt)}")
+    r = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: subprocess.run(
+            ["bash", "-lc", cmd], capture_output=True, text=True,
+            timeout=110))
+    out = (r.stdout or "").strip()
+    if not out:
+        why = (r.stderr or "").strip()[:200] or f"exit {r.returncode}"
+        return f"(the sandbox ran nothing for me: {why})"
+    return out[:1200]
+
+
+async def run_tool(bot, name: str, args: dict, member=None,
+                   admin: bool = False) -> str:
+    """Dispatch one tool call through the registry (schema, tier, timeout,
+    audit all live there). Kept as this module's front door because callers
+    and tests know it; it is now a delegate, not the source of truth."""
+    return await tool_registry.run(bot, name, args, member=member, admin=admin)
 
 
 async def run_loop(bot, base_system: str, user_prompt, *,
                    max_tokens: int = 400, timeout: float = 30.0,
                    allow_actions: bool = True, content_payload=None,
-                   admin: bool = False) -> dict:
+                   admin: bool = False, member=None) -> dict:
     """The multi-turn loop. Returns the final {"reply": ..., "actions": [...]} (or {}).
 
     user_prompt: a string, or (for vision) an OpenAI content-part list —
     the images ride on the first user message.
-    admin: enables the computer tool (opencode delegation) for this loop.
+    member: the discord.Member who triggered this, when known — tools gate
+        on their tier. admin: shorthand for the caller's tier already being
+        admin (used when no Member object rode along).
+    admin: enables the admin-tier tools (computer, opencode delegation) for
+        this loop — their prompt lines only appear, and their calls only
+        run, when the caller is allowed.
     """
-    sys_prompt = base_system + TOOLS_PROMPT.replace(
-        "{computer_line}", COMPUTER_TOOL if admin else "") + EVIDENCE_RULE
+    sys_prompt = base_system + tool_registry.tools_prompt(admin=admin) + EVIDENCE_RULE
     messages = [{"role": "system", "content": sys_prompt},
                 {"role": "user", "content": user_prompt if content_payload is None
                  else content_payload}]
@@ -444,7 +451,8 @@ async def run_loop(bot, base_system: str, user_prompt, *,
             return {"reply": text, "actions": []}
         if "tool" in data and hop < MAX_HOPS - 1:
             tool_calls += 1
-            result = await run_tool(bot, data.get("tool"), data.get("args") or {})
+            result = await run_tool(bot, data.get("tool"), data.get("args") or {},
+                                    member=member, admin=admin)
             messages.append({"role": "assistant", "content": json.dumps(data)})
             messages.append({"role": "user", "content": f"tool result:\n{result[:1200]}\n\n"
                              "(continue — reply or call another tool)"})

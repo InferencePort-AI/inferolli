@@ -17,7 +17,9 @@ import tools_server
 
 
 def run_tool(name, args):
-    return asyncio.run(tools_server.run_tool(mock.Mock(), name, args))
+    # admin=True: these tests exercise the handler's honesty, not the tier
+    # gate (which has its own tests in test_tool_registry)
+    return asyncio.run(tools_server.run_tool(mock.Mock(), name, args, admin=True))
 
 
 class NoWorkspaceTests(unittest.TestCase):

@@ -63,6 +63,19 @@ class UtilsCog(commands.Cog):
         await interaction.response.send_message(
             f"slowmode → {seconds}s" if seconds else "slowmode off", ephemeral=True)
 
+    @app_commands.command(name="tools",
+                          description="What i can look up for you, and who can use what")
+    async def tools(self, interaction: discord.Interaction):
+        """The human-facing view of the tool registry — same source of truth
+        the model's prompt is generated from, so it can never advertise a
+        capability that isn't installed."""
+        import permissions
+        import tool_registry
+        tier = permissions.tier_of(interaction.user)
+        await interaction.response.send_message(
+            f"my lookup tools (you're **{tier}**):\n\n"
+            f"{tool_registry.listing(tier)}", ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(UtilsCog(bot))

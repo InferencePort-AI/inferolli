@@ -41,7 +41,7 @@ class RunLoopTests(unittest.TestCase):
         )
         ran = []
 
-        async def fake_run_tool(bot, name, args):
+        async def fake_run_tool(bot, name, args, **kw):
             ran.append((name, args))
             return "SEARCH RESULTS"
 
@@ -85,7 +85,7 @@ class RunLoopTests(unittest.TestCase):
             {"tool": "web_search", "args": {"query": "y"}},
         )
 
-        async def fake_run_tool(bot, name, args):
+        async def fake_run_tool(bot, name, args, **kw):
             return "r"
 
         with mock.patch.object(tools_server.ai, "chat_for", fake), \

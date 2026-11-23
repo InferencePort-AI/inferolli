@@ -163,8 +163,14 @@ class ToolRegistrationTests(unittest.TestCase):
         self.assertIn("discord_search", tools_server.TOOLS_PROMPT)
 
     def test_tool_is_routed(self):
-        import inspect
-        self.assertIn('"discord_search"', inspect.getsource(tools_server.run_tool))
+        # routing is registry-driven now: the invariant is that the tool is
+        # registered (so run_tool can reach it), not that its name is spelled
+        # out in run_tool's source
+        self.assertIsNotNone(tools_server.tool_registry.get("discord_search"))
+        # and it actually dispatches through run_tool
+        out = asyncio.run(tools_server.run_tool(
+            FakeBot(None), "discord_search", {"query": "zzz_nope"}))
+        self.assertNotIn("unknown tool", out)
 
 
 if __name__ == "__main__":

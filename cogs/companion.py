@@ -725,7 +725,8 @@ class CompanionCog(commands.Cog):
                             tools_server.run_loop(self.bot, system + ACTIONS_PROMPT, user,
                                                   max_tokens=400, timeout=30.0,
                                                   content_payload=content_payload,
-                                                  admin=helpers.is_admin(message.author)),
+                                                  admin=helpers.is_admin(message.author),
+                                                  member=message.author),
                             timeout=110.0)
                         reply = str(data.get("reply", "")).strip()
 

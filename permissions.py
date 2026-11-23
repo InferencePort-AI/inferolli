@@ -77,6 +77,28 @@ def required_tier(action: str) -> str:
     return want if want in _RANK else "admin"
 
 
+# --- tools (tool_registry) ---
+# Tools carry their own default tier in the spec; a server can override any
+# of them in config.json (`permissions.tool_tiers`) without touching code.
+
+def _tool_tiers() -> dict:
+    return settings.get("permissions.tool_tiers", {}) or {}
+
+
+def rank(tier: str) -> int:
+    return _RANK.get(tier, 0)
+
+
+def tool_tier(name: str, default: str = "member") -> str:
+    """Minimum tier a tool needs: config override, else the spec default."""
+    want = _tool_tiers().get(name, default)
+    return want if want in _RANK else default
+
+
+def tool_allows(member: discord.Member, name: str, default: str = "member") -> bool:
+    return rank(tier_of(member)) >= rank(tool_tier(name, default))
+
+
 def allows(member: discord.Member, action: str) -> bool:
     """True if this member may perform `action`."""
     return _RANK[tier_of(member)] >= _RANK[required_tier(action)]
