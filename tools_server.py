@@ -464,3 +464,10 @@ async def run_loop(bot, base_system: str, user_prompt, *,
             log.warning("reply claims verification without a tool call: %r", reply[:90])
         return {"reply": reply, "actions": actions}
     return {"reply": "", "actions": []}
+
+
+# Registration happens on import — and this import sits at the BOTTOM of the
+# module on purpose: the prompt lists tools in registration order, so this
+# reads "the server tools first, then the free pack". Importing at the top
+# would put weather ahead of web_search in every prompt the model sees.
+import tools_free  # noqa: E402,F401  (registers weather/time/wiki/news/fx/define)

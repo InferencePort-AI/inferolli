@@ -19,11 +19,14 @@ def run(coro):
 
 
 class RegistrationTests(unittest.TestCase):
-    def test_all_seven_tools_are_registered(self):
+    def test_all_tools_are_registered(self):
+        # server tools first, then the keyless pack (registration order is
+        # prompt order; tools_server imports tools_free after its own tools)
         self.assertEqual(
             tool_registry.names(),
             ["web_search", "fetch_page", "channel_history", "discord_search",
-             "member_profile", "docs_search", "computer"])
+             "member_profile", "docs_search", "computer",
+             "weather", "time", "wiki", "news", "fx", "define"])
 
     def test_computer_is_admin_tier_the_rest_member(self):
         for spec in tool_registry.specs():
